@@ -1,19 +1,30 @@
+local configPath = "Teach Companion Spells"
+local defaultConfig = { hideSpellsButton = true, debugMode = false }
+local config = mwse.loadConfig(configPath, defaultConfig)
 local data = require("JosephMcKean.teachCompanionSpells.data")
+local log = require("logging.logger").new({ name = configPath, logLevel = config.debugMode and "DEBUG" or "INFO" })
 
 --- Checks if the npc is a potential follower
 --- @param ref tes3reference
 --- @return boolean
 local function checkIfPotentialCompanion(ref)
-	return (ref.context and ref.context["companion"]) and true or false
+	local isPotentialCompanion = (ref.context and ref.context["companion"]) and true or false
+	if isPotentialCompanion then
+		log:debug("%s is a potential companion", ref.id)
+	end
+	return isPotentialCompanion
 end
--- (currentRef.context and currentRef.context["companion"]) and true
 
 --- Checks if the npc is a potential follower
 --- @param ref tes3reference
 --- @return boolean
 local function checkIfCurrentCompanion(ref)
-	return (ref.context and ref.context["companion"] and ref.context["companion"] == 1) or
-	       tes3.getCurrentAIPackageId({ reference = ref }) == tes3.aiPackage.follow
+	local isCurrentCompanion = (ref.context and ref.context["companion"] and ref.context["companion"] == 1) or
+	                           tes3.getCurrentAIPackageId({ reference = ref }) == tes3.aiPackage.follow
+	if isCurrentCompanion then
+		log:debug("%s is currently a companion", ref.id)
+	end
+	return isCurrentCompanion
 end
 
 -- To keep the service buttons visible after the menu updates
@@ -27,15 +38,33 @@ local function setServiceButtonVisibilitiesToTrue()
 	if serviceButton and not serviceButton.visible then
 		if checkIfCurrentCompanion(tes3ui.getServiceActor().reference) then
 			serviceButton.visible = true
+			log:debug("Teach Spells button set to visible")
 		end
 	end
+end
+
+local function buttonDisabled(playerSpells, actorSpells)
+	return table.empty(playerSpells) and table.empty(actorSpells)
+end
+
+local function getSpells(targetRef)
+	local spells = tes3.getSpells({
+		target = targetRef,
+		spellType = tes3.spellType.spell,
+		getRaceSpells = false,
+		getBirthsignSpells = false,
+	})
+	table.sort(spells, function(a, b)
+		return a.name < b.name
+	end)
+	return spells
 end
 
 --- @param e uiActivatedEventData
 local function onMenuDialogActivated(e)
 	local actor = tes3ui.getServiceActor()
 	local actorRef = actor.reference ---@type tes3reference
-
+	log:debug("Talking to %s", actorRef.id)
 	local topicsScrollPane = e.element:findChild(data.GUI_ID.MenuDialog_TopicList)
 	local divider = topicsScrollPane:findChild(data.GUI_ID.MenuDialog_Divider)
 	local topicsList = divider.parent
@@ -44,16 +73,13 @@ local function onMenuDialogActivated(e)
 	-- first time, after that, we update the visibility on each "uiEvent" event.
 	local updatedOnce = false
 	local function updateOnce()
-		-- e.element:unregisterAfter(tes3.uiEvent.update, updateOnce)
-		-- Using unregisterAfter would cause the game to crash if there is still a lower priority callback registered.
 		if updatedOnce then
 			return
 		end
 		updatedOnce = true
-
 		setServiceButtonVisibilitiesToTrue()
 	end
-	e.element:registerAfter(tes3.uiEvent.update, updateOnce)
+	e.element:registerAfter("update", updateOnce)
 
 	-- Add the service buttons
 	if checkIfPotentialCompanion(actorRef) or checkIfCurrentCompanion(actorRef) then
@@ -62,6 +88,7 @@ local function onMenuDialogActivated(e)
 			id = data.GUI_ID.MenuDialog_Teach_Spells,
 			text = data.GUI_text.MenuDialog_Teach_Spells,
 		})
+		log:debug("Teach Spells button created")
 		-- Potential companion but not yet a companion
 		if (actorRef.context and actorRef.context["companion"] and actorRef.context["companion"] ~= 1) then
 			button.visible = false
@@ -71,7 +98,8 @@ local function onMenuDialogActivated(e)
 		topicsList:reorderChildren(divider, button, 1)
 
 		--- Called when the player clicks on the service button. Opens the teach spells service menu
-		local function showTeachSpellsMenu(playerSpells, actorSpells)
+		local function showTeachSpellsMenu()
+			log:debug("Creating Teach Spells menu...")
 			local menu = tes3ui.createMenu({ id = data.GUI_ID.MenuTeachSpells, dragFrame = true })
 			menu.width = 700
 			menu.height = 490
@@ -128,10 +156,12 @@ local function onMenuDialogActivated(e)
 			listYour.paddingLeft = 2
 			listYour.flowDirection = "left_to_right"
 
+			---@param ref tes3reference
+			---@param spell tes3spell
 			local function createSpellBlock(ref, spell)
 				local spellList = ((ref == tes3.player) and listMy) or listYour
 				local targetRef = ((ref == tes3.player) and actorRef) or tes3.player
-				local targetSpells = ((ref == tes3.player) and actorSpells) or playerSpells
+				local targetSpells = getSpells(targetRef)
 				local spellBlock = spellList:createBlock({ id = data.GUI_ID.MenuTeachSpells_spell })
 				spellBlock.parent.flowDirection = "top_to_bottom"
 				spellBlock.autoWidth = true
@@ -173,38 +203,8 @@ local function onMenuDialogActivated(e)
 								id = tes3ui.registerID("MenuTeachSpells_help_icon"),
 								path = "icons\\" .. spell.effects[i].object.icon,
 							})
-							effectIcon.borderRight = 10
-							local magnitude = ""
-							if not effect.object.hasNoMagnitude then
-								if effect.min == effect.max then
-									if effect.max == 1 then
-										magnitude = effect.max .. " pt "
-									else
-										magnitude = effect.max .. " pts "
-									end
-								else
-									if effect.max == 1 then
-										magnitude = (effect.min .. " to " .. effect.max .. " pt ")
-									else
-										magnitude = (effect.min .. " to " .. effect.max .. " pts ")
-									end
-								end
-							end
-							local duration = ""
-							if not effect.object.hasNoDuration then
-								if effect.min == 1 then
-									duration = "for " .. effect.duration .. " sec "
-								else
-									duration = "for " .. effect.duration .. " secs "
-								end
-							end
-							local range = effect.range and ("in " .. effect.range .. " ft ") or ""
-							local rangeType = ((effect.rangeType == tes3.effectRange.self) and "on Self") or
-							                  ((effect.rangeType == tes3.effectRange.touch) and "on Touch") or
-							                  ((effect.rangeType == tes3.effectRange.targer) and "on Target") or ""
-							local descLabel = effectBlock:createLabel({
-								text = effect.object.name .. " " .. magnitude .. duration .. range .. rangeType,
-							})
+							effectIcon.borderRight = 8
+							local descLabel = effectBlock:createLabel({ text = tostring(effect) })
 						end
 					end
 				end)
@@ -228,9 +228,11 @@ local function onMenuDialogActivated(e)
 				end)
 			end
 			for _, ref in ipairs({ tes3.player, actorRef }) do
-				local spells = ((ref == tes3.player) and playerSpells) or actorSpells
-				for _, spell in ipairs(spells) do
-					createSpellBlock(ref, spell)
+				local spells = getSpells(ref)
+				if spells then
+					for _, spell in ipairs(spells) do
+						createSpellBlock(ref, spell)
+					end
 				end
 			end
 			local buttonOk = menu:createButton({ id = data.GUI_ID.MenuTeachSpells_ok, text = data.GUI_text.MenuTeachSpells_ok })
@@ -242,46 +244,79 @@ local function onMenuDialogActivated(e)
 			end)
 			tes3ui.enterMenuMode(data.GUI_ID.MenuTeachSpells)
 		end
-		button:register("mouseClick", function()
-			local playerSpells = tes3.getSpells({
-				target = tes3.player,
-				spellType = tes3.spellType.spell,
-				getRaceSpells = false,
-				getBirthsignSpells = false,
-			})
-			local actorSpells = tes3.getSpells({
-				target = actorRef,
-				spellType = tes3.spellType.spell,
-				getRaceSpells = false,
-				getBirthsignSpells = false,
-			})
-			if playerSpells == nil or actorSpells == nil then
-				tes3.messageBox("Both of you don't know any spell")
+
+		local function updateButton()
+			local playerSpells = getSpells(tes3.player)
+			local actorSpells = getSpells(actorRef)
+			if buttonDisabled(playerSpells, actorSpells) then
+				button.disabled = true
+				button.widget.state = 2
 			else
-				table.sort(playerSpells, function(a, b)
-					return a.name < b.name
-				end)
-				table.sort(actorSpells, function(a, b)
-					return a.name < b.name
-				end)
-				showTeachSpellsMenu(playerSpells, actorSpells)
+				button.disabled = false
+			end
+		end
+		button:register("help", function()
+			updateButton()
+			if buttonDisabled(getSpells(tes3.player), getSpells(actorRef)) then
+				local tooltip = tes3ui.createTooltipMenu()
+				local tooltipText = tooltip:createLabel({ text = "Both of you don't know any spell" })
+				tooltipText.wrapText = true
 			end
 		end)
-		-- Add a tooltip
-		button:register("help", function()
-			local tooltip = tes3ui.createTooltipMenu()
-			local tooltipText = tooltip:createLabel({ text = data.GUI_text.helpLabelText })
-			tooltipText.wrapText = true
+		button:register("mouseClick", function()
+			updateButton()
+			showTeachSpellsMenu()
 		end)
+
+		-- Hide Spells button
+		if config.hideSpellsButton then
+			log:debug("Finding Spells button...")
+			local spellsButton = e.element:findChild("MenuDialog_service_spells")
+			timer.delayOneFrame(function()
+				if not spellsButton.visible then
+					log:debug("Spells button not visible")
+					return
+				end
+				if button.disabled then
+					log:debug("Teach Spells button is disabled")
+					return
+				end
+				log:debug("Hiding Spells button...")
+				spellsButton.visible = false
+			end, timer.real)
+		end
 	end
 end
 
 local function onInit()
 	event.register("infoGetText", setServiceButtonVisibilitiesToTrue)
 	event.register("uiEvent", setServiceButtonVisibilitiesToTrue)
-	event.register("uiActivated", onMenuDialogActivated, { filter = "MenuDialog", priority = -100 })
+	event.register("uiActivated", onMenuDialogActivated, { filter = "MenuDialog", priority = -200 })
 end
 event.register("initialized", onInit)
+
+local function registerModConfig()
+	local template = mwse.mcm.createTemplate({ name = configPath })
+	template:register()
+	template.onClose = function()
+		mwse.saveConfig(configPath, config)
+	end
+	local preferences = template:createSideBarPage{ label = "Mod Preferences", noScroll = true }
+	preferences:createYesNoButton({
+		label = "Hide Spells button",
+		description = "Hide Spells button for companions who sell spells. (Default: Yes)",
+		variable = mwse.mcm.createTableVariable { id = "hideSpellsButton", table = config },
+	})
+	preferences:createYesNoButton({
+		label = "Debug mode",
+		description = "For troubleshooting. (Default: No)",
+		variable = mwse.mcm.createTableVariable { id = "debugMode", table = config },
+		callback = function(self)
+			log:setLogLevel(self.variable.value and "DEBUG" or "INFO")
+		end,
+	})
+end
+event.register("modConfigReady", registerModConfig)
 
 --[[
     Convenient command:
